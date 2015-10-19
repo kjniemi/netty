@@ -23,6 +23,7 @@ import io.netty.util.ByteString;
 import io.netty.util.CharsetUtil;
 import io.netty.util.Recycler;
 import io.netty.util.Recycler.Handle;
+import io.netty.util.concurrent.FastThreadLocal;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.SystemPropertyUtil;
@@ -47,7 +48,14 @@ import java.util.Locale;
 public final class ByteBufUtil {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(ByteBufUtil.class);
+    private static final FastThreadLocal<CharBuffer> CHAR_BUFFERS = new FastThreadLocal<CharBuffer>() {
+        @Override
+        protected CharBuffer initialValue() throws Exception {
+            return CharBuffer.allocate(1024);
+        }
+    };
 
+    private static final int MAX_CHAR_BUFFER_SIZE;
     private static final char[] HEXDUMP_TABLE = new char[256 * 4];
     private static final String NEWLINE = StringUtil.NEWLINE;
     private static final String[] BYTE2HEX = new String[256];
@@ -133,6 +141,9 @@ public final class ByteBufUtil {
 
         THREAD_LOCAL_BUFFER_SIZE = SystemPropertyUtil.getInt("io.netty.threadLocalDirectBufferSize", 64 * 1024);
         logger.debug("-Dio.netty.threadLocalDirectBufferSize: {}", THREAD_LOCAL_BUFFER_SIZE);
+
+        MAX_CHAR_BUFFER_SIZE = SystemPropertyUtil.getInt("io.netty.maxThreadLocalCharBufferSize", 16 * 1024);
+        logger.debug("-Dio.netty.maxThreadLocalCharBufferSize: {}", MAX_CHAR_BUFFER_SIZE);
     }
 
     /**
@@ -450,37 +461,44 @@ public final class ByteBufUtil {
         final int len = seq.length();
         final int maxSize = len * 3;
         buf.ensureWritable(maxSize);
-        if (buf instanceof AbstractByteBuf) {
-            // Fast-Path
-            AbstractByteBuf buffer = (AbstractByteBuf) buf;
-            int oldWriterIndex = buffer.writerIndex;
-            int writerIndex = oldWriterIndex;
 
-            // We can use the _set methods as these not need to do any index checks and reference checks.
-            // This is possible as we called ensureWritable(...) before.
-            for (int i = 0; i < len; i++) {
-                char c = seq.charAt(i);
-                if (c < 0x80) {
-                    buffer._setByte(writerIndex++, (byte) c);
-                } else if (c < 0x800) {
-                    buffer._setByte(writerIndex++, (byte) (0xc0 | (c >> 6)));
-                    buffer._setByte(writerIndex++, (byte) (0x80 | (c & 0x3f)));
-                } else {
-                    buffer._setByte(writerIndex++, (byte) (0xe0 | (c >> 12)));
-                    buffer._setByte(writerIndex++, (byte) (0x80 | ((c >> 6) & 0x3f)));
-                    buffer._setByte(writerIndex++, (byte) (0x80 | (c & 0x3f)));
-                }
+        for (;;) {
+            if (buf instanceof AbstractByteBuf) {
+                return writeUtf8((AbstractByteBuf) buf, seq, len);
+            } else if (buf instanceof WrappedByteBuf) {
+                // Unwrap as the wrapped buffer may be an AbstractByteBuf and so we can use fast-path.
+                buf = buf.unwrap();
+            } else {
+                byte[] bytes = seq.toString().getBytes(CharsetUtil.UTF_8);
+                buf.writeBytes(bytes);
+                return bytes.length;
             }
-            // update the writerIndex without any extra checks for performance reasons
-            buffer.writerIndex = writerIndex;
-            return writerIndex - oldWriterIndex;
-        } else {
-            // Maybe we could also check if we can unwrap() to access the wrapped buffer which
-            // may be an AbstractByteBuf. But this may be overkill so let us keep it simple for now.
-            byte[] bytes = seq.toString().getBytes(CharsetUtil.UTF_8);
-            buf.writeBytes(bytes);
-            return bytes.length;
         }
+    }
+
+    // Fast-Path implementation
+    private static int writeUtf8(AbstractByteBuf buffer, CharSequence seq, int len) {
+        int oldWriterIndex = buffer.writerIndex;
+        int writerIndex = oldWriterIndex;
+
+        // We can use the _set methods as these not need to do any index checks and reference checks.
+        // This is possible as we called ensureWritable(...) before.
+        for (int i = 0; i < len; i++) {
+            char c = seq.charAt(i);
+            if (c < 0x80) {
+                buffer._setByte(writerIndex++, (byte) c);
+            } else if (c < 0x800) {
+                buffer._setByte(writerIndex++, (byte) (0xc0 | (c >> 6)));
+                buffer._setByte(writerIndex++, (byte) (0x80 | (c & 0x3f)));
+            } else {
+                buffer._setByte(writerIndex++, (byte) (0xe0 | (c >> 12)));
+                buffer._setByte(writerIndex++, (byte) (0x80 | ((c >> 6) & 0x3f)));
+                buffer._setByte(writerIndex++, (byte) (0x80 | (c & 0x3f)));
+            }
+        }
+        // update the writerIndex without any extra checks for performance reasons
+        buffer.writerIndex = writerIndex;
+        return writerIndex - oldWriterIndex;
     }
 
     /**
@@ -502,24 +520,33 @@ public final class ByteBufUtil {
         if (seq instanceof AsciiString) {
             AsciiString asciiString = (AsciiString) seq;
             buf.writeBytes(asciiString.array(), asciiString.arrayOffset(), asciiString.length());
-        } else if (buf instanceof AbstractByteBuf) {
-            // Fast-Path
-            AbstractByteBuf buffer = (AbstractByteBuf) buf;
-            int writerIndex = buffer.writerIndex;
-
-            // We can use the _set methods as these not need to do any index checks and reference checks.
-            // This is possible as we called ensureWritable(...) before.
-            for (int i = 0; i < len; i++) {
-                buffer._setByte(writerIndex++, (byte) seq.charAt(i));
-            }
-            // update the writerIndex without any extra checks for performance reasons
-            buffer.writerIndex = writerIndex;
         } else {
-            // Maybe we could also check if we can unwrap() to access the wrapped buffer which
-            // may be an AbstractByteBuf. But this may be overkill so let us keep it simple for now.
-            buf.writeBytes(seq.toString().getBytes(CharsetUtil.US_ASCII));
+            for (;;) {
+                if (buf instanceof AbstractByteBuf) {
+                    writeAscii((AbstractByteBuf) buf, seq, len);
+                    break;
+                } else if (buf instanceof WrappedByteBuf) {
+                    // Unwrap as the wrapped buffer may be an AbstractByteBuf and so we can use fast-path.
+                    buf = buf.unwrap();
+                } else {
+                    buf.writeBytes(seq.toString().getBytes(CharsetUtil.US_ASCII));
+                }
+            }
         }
         return len;
+    }
+
+    // Fast-Path implementation
+    private static void writeAscii(AbstractByteBuf buffer, CharSequence seq, int len) {
+        int writerIndex = buffer.writerIndex;
+
+        // We can use the _set methods as these not need to do any index checks and reference checks.
+        // This is possible as we called ensureWritable(...) before.
+        for (int i = 0; i < len; i++) {
+            buffer._setByte(writerIndex++, (byte) seq.charAt(i));
+        }
+        // update the writerIndex without any extra checks for performance reasons
+        buffer.writerIndex = writerIndex;
     }
 
     /**
@@ -563,10 +590,41 @@ public final class ByteBufUtil {
         }
     }
 
-    static String decodeString(ByteBuffer src, Charset charset) {
+    static String decodeString(ByteBuf src, int readerIndex, int len, Charset charset) {
+        if (len == 0) {
+            return StringUtil.EMPTY_STRING;
+        }
         final CharsetDecoder decoder = CharsetUtil.getDecoder(charset);
-        final CharBuffer dst = CharBuffer.allocate(
-                (int) ((double) src.remaining() * decoder.maxCharsPerByte()));
+        final int maxLength = (int) ((double) len * decoder.maxCharsPerByte());
+        CharBuffer dst = CHAR_BUFFERS.get();
+        if (dst.length() < maxLength) {
+            dst = CharBuffer.allocate(maxLength);
+            if (maxLength <= MAX_CHAR_BUFFER_SIZE) {
+                CHAR_BUFFERS.set(dst);
+            }
+        } else {
+            dst.clear();
+        }
+        if (src.nioBufferCount() == 1) {
+            // Use internalNioBuffer(...) to reduce object creation.
+            decodeString(decoder, src.internalNioBuffer(readerIndex, len), dst);
+        } else {
+            // We use a heap buffer as CharsetDecoder is most likely able to use a fast-path if src and dst buffers
+            // are both backed by a byte array.
+            ByteBuf buffer = src.alloc().heapBuffer(len);
+            try {
+                buffer.writeBytes(src, readerIndex, len);
+                // Use internalNioBuffer(...) to reduce object creation.
+                decodeString(decoder, buffer.internalNioBuffer(readerIndex, len), dst);
+            } finally {
+                // Release the temporary buffer again.
+                buffer.release();
+            }
+        }
+        return dst.flip().toString();
+    }
+
+    private static void decodeString(CharsetDecoder decoder, ByteBuffer src, CharBuffer dst) {
         try {
             CoderResult cr = decoder.decode(src, dst, true);
             if (!cr.isUnderflow()) {
@@ -579,7 +637,6 @@ public final class ByteBufUtil {
         } catch (CharacterCodingException x) {
             throw new IllegalStateException(x);
         }
-        return dst.flip().toString();
     }
 
     /**
