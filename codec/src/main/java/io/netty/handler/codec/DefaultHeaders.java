@@ -85,12 +85,17 @@ public class DefaultHeaders<T> implements Headers<T> {
 
     @SuppressWarnings("unchecked")
     public DefaultHeaders(ValueConverter<T> valueConverter) {
-        this(valueConverter, NameValidator.NOT_NULL);
+        this(JAVA_HASHER, valueConverter);
     }
 
     @SuppressWarnings("unchecked")
     public DefaultHeaders(ValueConverter<T> valueConverter, NameValidator<T> nameValidator) {
         this(JAVA_HASHER, valueConverter, nameValidator);
+    }
+
+    @SuppressWarnings("unchecked")
+    public DefaultHeaders(HashingStrategy<T> nameHashingStrategy, ValueConverter<T> valueConverter) {
+        this(nameHashingStrategy, valueConverter, NameValidator.NOT_NULL);
     }
 
     public DefaultHeaders(HashingStrategy<T> nameHashingStrategy,
@@ -535,7 +540,7 @@ public class DefaultHeaders<T> implements Headers<T> {
     public Headers<T> set(Headers<? extends T> headers) {
         checkNotNull(headers, "headers");
         if (headers == this) {
-            return this;
+            throw new IllegalArgumentException("can't add to itself.");
         }
         clear();
         if (headers instanceof DefaultHeaders) {

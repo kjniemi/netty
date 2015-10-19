@@ -21,26 +21,28 @@ import static org.junit.Assert.*;
 
 public abstract class AbstractPooledByteBufTest extends AbstractByteBufTest {
 
-    private ByteBuf buffer;
-
     protected abstract ByteBuf alloc(int length);
 
     @Override
     protected ByteBuf newBuffer(int length) {
-        buffer = alloc(length);
+        ByteBuf buffer = alloc(length);
         assertEquals(0, buffer.writerIndex());
         assertEquals(0, buffer.readerIndex());
         return buffer;
     }
 
-    @Override
-    protected ByteBuf[] components() {
-        return new ByteBuf[] { buffer };
+    @Test
+    public void testDiscardMarks() {
+        testDiscardMarks(4);
     }
 
     @Test
-    public void testDiscardMarks() {
-        ByteBuf buf = newBuffer(4);
+    public void testDiscardMarksUnpooled() {
+        testDiscardMarks(32 * 1024 * 1024);
+    }
+
+    private void testDiscardMarks(int capacity) {
+        ByteBuf buf = newBuffer(capacity);
         buf.writeShort(1);
 
         buf.skipBytes(1);
@@ -49,7 +51,7 @@ public abstract class AbstractPooledByteBufTest extends AbstractByteBufTest {
         buf.markWriterIndex();
         assertTrue(buf.release());
 
-        ByteBuf buf2 = newBuffer(4);
+        ByteBuf buf2 = newBuffer(capacity);
 
         assertSame(unwrapIfNeeded(buf), unwrapIfNeeded(buf2));
 

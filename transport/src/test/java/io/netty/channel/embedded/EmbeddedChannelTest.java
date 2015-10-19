@@ -16,9 +16,11 @@
 package io.netty.channel.embedded;
 
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerAdapter;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelId;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
@@ -133,5 +135,74 @@ public class EmbeddedChannelTest {
         Assert.assertNull(channel.readInbound());
         Assert.assertSame(2, channel.readOutbound());
         Assert.assertNull(channel.readOutbound());
+    }
+
+    @Test
+    public void testConstructWithChannelId() {
+        ChannelId channelId = new CustomChannelId(1);
+        EmbeddedChannel channel = new EmbeddedChannel(channelId);
+        Assert.assertSame(channelId, channel.id());
+    }
+
+    // See https://github.com/netty/netty/issues/4316.
+    @Test(timeout = 2000)
+    public void testFireChannelInactiveAndUnregisteredOnClose() throws InterruptedException {
+        testFireChannelInactiveAndUnregistered(new Action() {
+            @Override
+            public ChannelFuture doRun(Channel channel) {
+                return channel.close();
+            }
+        });
+        testFireChannelInactiveAndUnregistered(new Action() {
+            @Override
+            public ChannelFuture doRun(Channel channel) {
+                return channel.close(channel.newPromise());
+            }
+        });
+    }
+
+    @Test(timeout = 2000)
+    public void testFireChannelInactiveAndUnregisteredOnDisconnect() throws InterruptedException {
+        testFireChannelInactiveAndUnregistered(new Action() {
+            @Override
+            public ChannelFuture doRun(Channel channel) {
+                return channel.disconnect();
+            }
+        });
+
+        testFireChannelInactiveAndUnregistered(new Action() {
+            @Override
+            public ChannelFuture doRun(Channel channel) {
+                return channel.disconnect(channel.newPromise());
+            }
+        });
+    }
+
+    private static void testFireChannelInactiveAndUnregistered(Action action) throws InterruptedException {
+        final CountDownLatch latch = new CountDownLatch(3);
+        EmbeddedChannel channel = new EmbeddedChannel(new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+                latch.countDown();
+                ctx.executor().execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        // Should be executed.
+                        latch.countDown();
+                    }
+                });
+            }
+
+            @Override
+            public void channelUnregistered(ChannelHandlerContext ctx) throws Exception {
+                latch.countDown();
+            }
+        });
+        action.doRun(channel).syncUninterruptibly();
+        latch.await();
+    }
+
+    private interface Action {
+        ChannelFuture doRun(Channel channel);
     }
 }

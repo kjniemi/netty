@@ -135,6 +135,8 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
     private boolean singleDecode;
     private boolean decodeWasNull;
     private boolean first;
+    private int discardAfterReads = 16;
+    private int numReads;
 
     protected ByteToMessageDecoder() {
         CodecUtil.ensureNotSharable(this);
@@ -168,6 +170,17 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
             throw new NullPointerException("cumulator");
         }
         this.cumulator = cumulator;
+    }
+
+    /**
+     * Set the number of reads after which {@link ByteBuf#discardSomeReadBytes()} are called and so free up memory.
+     * The default is {@code 16}.
+     */
+    public void setDiscardAfterReads(int discardAfterReads) {
+        if (discardAfterReads <= 0) {
+            throw new IllegalArgumentException("discardAfterReads must be > 0");
+        }
+        this.discardAfterReads = discardAfterReads;
     }
 
     /**
@@ -205,6 +218,7 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
             buf.release();
         }
         cumulation = null;
+        numReads = 0;
         ctx.fireChannelReadComplete();
         handlerRemoved0(ctx);
     }
@@ -234,15 +248,19 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
                 throw new DecoderException(t);
             } finally {
                 if (cumulation != null && !cumulation.isReadable()) {
+                    numReads = 0;
                     cumulation.release();
                     cumulation = null;
+                } else if (++ numReads >= discardAfterReads) {
+                    // We did enough reads already try to discard some bytes so we not risk to see a OOME.
+                    // See https://github.com/netty/netty/issues/4275
+                    numReads = 0;
+                    discardSomeReadBytes();
                 }
-                int size = out.size();
-                decodeWasNull = size == 0;
 
-                for (int i = 0; i < size; i ++) {
-                    ctx.fireChannelRead(out.get(i));
-                }
+                int size = out.size();
+                decodeWasNull = !out.insertSinceRecycled();
+                fireChannelRead(ctx, out, size);
                 out.recycle();
             }
         } else {
@@ -250,8 +268,18 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
         }
     }
 
+    /**
+     * Get {@code numElements} out of the {@link List} and forward these through the pipeline.
+     */
+    static void fireChannelRead(ChannelHandlerContext ctx, List<Object> msgs, int numElements) {
+        for (int i = 0; i < numElements; i ++) {
+            ctx.fireChannelRead(msgs.get(i));
+        }
+    }
+
     @Override
     public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+        numReads = 0;
         discardSomeReadBytes();
         if (decodeWasNull) {
             decodeWasNull = false;
@@ -296,9 +324,7 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
                     cumulation = null;
                 }
                 int size = out.size();
-                for (int i = 0; i < size; i++) {
-                    ctx.fireChannelRead(out.get(i));
-                }
+                fireChannelRead(ctx, out, size);
                 if (size > 0) {
                     // Something was read, call fireChannelReadComplete()
                     ctx.fireChannelReadComplete();
@@ -323,6 +349,13 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
         try {
             while (in.isReadable()) {
                 int outSize = out.size();
+
+                if (outSize > 0) {
+                    fireChannelRead(ctx, out, outSize);
+                    out.clear();
+                    outSize = 0;
+                }
+
                 int oldInputLength = in.readableBytes();
                 decode(ctx, in, out);
 

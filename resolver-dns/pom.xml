@@ -20,7 +20,7 @@
   <parent>
     <groupId>io.netty</groupId>
     <artifactId>netty-parent</artifactId>
-    <version>4.1.0.Beta7-SNAPSHOT</version>
+    <version>4.1.0.Beta8-SNAPSHOT</version>
   </parent>
 
   <artifactId>netty-resolver-dns</artifactId>
@@ -43,6 +43,11 @@
       <groupId>${project.groupId}</groupId>
       <artifactId>netty-transport</artifactId>
       <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.directory.server</groupId>
+      <artifactId>apacheds-protocol-dns</artifactId>
+      <scope>test</scope>
     </dependency>
   </dependencies>
 </project>
